@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Room Bot
+After=network.target
+
+[Service]
+Type=simple
+User=room-bot
+WorkingDirectory=/opt/room-bot
+EnvironmentFile=/opt/room-bot/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/room-bot/src/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
