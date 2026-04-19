@@ -9,7 +9,7 @@ Discord bot for temporary voice rooms.
 - The bot posts a Russian control panel inside the room chat with buttons for management.
 - The room owner can open modal windows, change the room name, set the user limit, hide or show the room, lock or unlock access, and remove users.
 - Empty temporary rooms are deleted automatically.
-- A member can claim a room if the owner has left it.
+- A member can claim a room only if the owner has left it, 5 minutes have passed, and the member has role `1484577491275485256`.
 
 ## Setup
 
@@ -73,4 +73,5 @@ Also enable the `Server Members Intent` in the Discord Developer Portal.
 ## Notes
 
 - Temporary room ownership is stored in memory.
+- Claiming a room requires role `1484577491275485256` and a 5-minute delay after the owner leaves.
 - If the bot restarts, already existing temporary channels will no longer be tracked automatically.

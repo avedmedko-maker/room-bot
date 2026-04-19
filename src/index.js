@@ -32,6 +32,8 @@ const client = new Client({
 
 const temporaryRooms = new Map();
 const creationLocks = new Set();
+const CLAIM_ROLE_ID = "1484577491275485256";
+const CLAIM_DELAY_MS = 5 * 60 * 1000;
 
 const PANEL_MESSAGE = "Используй кнопки ниже, чтобы управлять своей комнатой.";
 const PANEL_BUTTONS = new ActionRowBuilder().addComponents(
@@ -87,12 +89,30 @@ function isRoomOwner(member, record) {
   return member.id === record.ownerId;
 }
 
-function canClaimRoom(member, voiceChannel, record) {
+function getClaimBlockReason(member, voiceChannel, record) {
   if (!record || record.ownerId === member.id) {
-    return false;
+    return "Ты не можешь забрать эту комнату.";
   }
 
-  return !voiceChannel.members.has(record.ownerId);
+  if (!member.roles.cache.has(CLAIM_ROLE_ID)) {
+    return "Забрать комнату могут только участники с нужной ролью.";
+  }
+
+  if (voiceChannel.members.has(record.ownerId)) {
+    return "Забрать комнату можно только после того, как текущий владелец выйдет.";
+  }
+
+  if (!record.ownerLeftAt) {
+    record.ownerLeftAt = Date.now();
+  }
+
+  const remainingMs = CLAIM_DELAY_MS - (Date.now() - record.ownerLeftAt);
+  if (remainingMs > 0) {
+    const remainingMinutes = Math.ceil(remainingMs / 60000);
+    return `Забрать комнату можно через ${remainingMinutes} мин. после выхода владельца.`;
+  }
+
+  return null;
 }
 
 function buildPanelEmbed(room, ownerId) {
@@ -232,6 +252,7 @@ async function createTemporaryRoom(member) {
   temporaryRooms.set(room.id, {
     ownerId: member.id,
     createdAt: Date.now(),
+    ownerLeftAt: null,
     panelMessageId: null,
   });
 
@@ -291,7 +312,19 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     }
 
     if (oldState.channelId && oldState.channelId !== newState.channelId) {
+      const oldRoomRecord = temporaryRooms.get(oldState.channelId);
+      if (oldRoomRecord && oldRoomRecord.ownerId === oldState.member?.id) {
+        oldRoomRecord.ownerLeftAt = oldRoomRecord.ownerLeftAt || Date.now();
+      }
+
       await deleteRoomIfEmpty(oldState.channel);
+    }
+
+    if (newState.channelId && oldState.channelId !== newState.channelId) {
+      const newRoomRecord = temporaryRooms.get(newState.channelId);
+      if (newRoomRecord && newRoomRecord.ownerId === newState.member?.id) {
+        newRoomRecord.ownerLeftAt = null;
+      }
     }
   } catch (error) {
     console.error("VoiceStateUpdate error:", error);
@@ -319,9 +352,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const { channel, record } = roomInfo;
 
       if (interaction.customId === "room-panel:claim") {
-        if (!canClaimRoom(member, channel, record)) {
+        const claimBlockReason = getClaimBlockReason(member, channel, record);
+        if (claimBlockReason) {
           await interaction.reply({
-            content: "Забрать комнату можно только после того, как текущий владелец выйдет.",
+            content: claimBlockReason,
             ephemeral: true,
           });
           return;
@@ -329,6 +363,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const previousOwnerId = record.ownerId;
         record.ownerId = member.id;
+        record.ownerLeftAt = null;
         await channel.permissionOverwrites.edit(previousOwnerId, {
           ManageChannels: false,
           MoveMembers: false,
