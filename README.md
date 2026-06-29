@@ -8,6 +8,7 @@ Discord bot for temporary voice rooms.
 - The bot moves the user into the new room automatically.
 - The bot posts a Russian control panel inside the room chat with buttons for management.
 - The room owner can open modal windows, change the room name, set the user limit, hide or show the room, lock or unlock access, and remove users.
+- The bot also supports an admin panel via `/admin-panel` on one server while managing bans, channels, and voice users on another target server.
 - Empty temporary rooms are deleted automatically.
 - A member can claim a room only if the owner has left it, 5 minutes have passed, and the member has role `1484577491275485256`.
 
@@ -58,6 +59,9 @@ Also enable the `Server Members Intent` in the Discord Developer Portal.
 ## Environment Variables
 
 - `DISCORD_TOKEN`: bot token.
+- `CLIENT_ID`: application client ID for slash command registration.
+- `ADMIN_GUILD_ID`: Discord server ID where `/admin-panel` will be registered.
+- `TARGET_GUILD_ID`: Discord server ID where admin actions will be executed.
 - `CREATE_CHANNEL_ID`: the voice channel that triggers room creation.
 - `TEMP_CATEGORY_ID`: optional category where temporary rooms should be created.
 - `ROOM_NAME_TEMPLATE`: optional room name template. Supported placeholders: `{displayName}`, `{username}`.

@@ -10,6 +10,9 @@ const {
   GatewayIntentBits,
   ModalBuilder,
   PermissionsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   TextInputBuilder,
   TextInputStyle,
 } = require("discord.js");
@@ -34,6 +37,36 @@ const temporaryRooms = new Map();
 const creationLocks = new Set();
 const CLAIM_ROLE_ID = "1484577491275485256";
 const CLAIM_DELAY_MS = 5 * 60 * 1000;
+const ADMIN_COMMAND_NAME = "admin-panel";
+const ADMIN_PANEL_BUTTONS = [
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("admin-panel:ban")
+      .setLabel("Забанить")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("admin-panel:delete-rooms")
+      .setLabel("Удалить комнаты")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("admin-panel:kick-all")
+      .setLabel("Кикнуть всех")
+      .setStyle(ButtonStyle.Secondary),
+  ),
+];
+const ADMIN_COMMANDS = [
+  new SlashCommandBuilder()
+    .setName(ADMIN_COMMAND_NAME)
+    .setDescription("Открыть админ-панель управления ботом"),
+].map((command) => command.toJSON());
+
+function getAdminGuildId() {
+  return process.env.ADMIN_GUILD_ID || process.env.GUILD_ID || null;
+}
+
+function getTargetGuildId() {
+  return process.env.TARGET_GUILD_ID || null;
+}
 
 const PANEL_MESSAGE = "Используй кнопки ниже, чтобы управлять своей комнатой.";
 const PANEL_BUTTONS = new ActionRowBuilder().addComponents(
@@ -66,6 +99,65 @@ function buildRoomName(member) {
   return template
     .replaceAll("{displayName}", member.displayName)
     .replaceAll("{username}", member.user.username);
+}
+
+function hasAdminAccess(member) {
+  return member.permissions.has(PermissionsBitField.Flags.Administrator)
+    || member.permissions.has(PermissionsBitField.Flags.BanMembers)
+    || member.permissions.has(PermissionsBitField.Flags.ManageChannels);
+}
+
+function buildAdminPanelPayload() {
+  return {
+    embeds: [
+      {
+        color: 0xed4245,
+        title: "Админ-панель",
+        description: "Управление ботом и временными комнатами.",
+        fields: [
+          {
+            name: "Забанить",
+            value: "Открывает окно для бана участника по ID или упоминанию.",
+          },
+          {
+            name: "Удалить комнаты",
+            value: "Удаляет все временные комнаты, которые сейчас отслеживает бот.",
+          },
+          {
+            name: "Кикнуть всех",
+            value: "Отключает всех пользователей из временных комнат бота.",
+          },
+        ],
+      },
+    ],
+    components: ADMIN_PANEL_BUTTONS,
+    ephemeral: true,
+  };
+}
+
+function buildBanModal() {
+  const targetInput = new TextInputBuilder()
+    .setCustomId("targetUser")
+    .setLabel("ID пользователя или @упоминание")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setPlaceholder("Вставь ID или @упоминание");
+
+  const reasonInput = new TextInputBuilder()
+    .setCustomId("banReason")
+    .setLabel("Причина бана")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(512)
+    .setPlaceholder("Причина (необязательно)");
+
+  return new ModalBuilder()
+    .setCustomId("admin-panel:ban")
+    .setTitle("Забанить участника")
+    .addComponents(
+      new ActionRowBuilder().addComponents(targetInput),
+      new ActionRowBuilder().addComponents(reasonInput),
+    );
 }
 
 function getRoomRecord(channelId) {
@@ -213,6 +305,93 @@ function normalizeUserId(rawValue) {
   return rawValue.replace(/[<@!>\s]/g, "");
 }
 
+async function registerCommands() {
+  const adminGuildId = getAdminGuildId();
+
+  if (!process.env.CLIENT_ID || !adminGuildId) {
+    console.warn("Skipping slash command registration: CLIENT_ID or ADMIN_GUILD_ID/GUILD_ID is missing.");
+    return;
+  }
+
+  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+  await rest.put(
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, adminGuildId),
+    { body: ADMIN_COMMANDS },
+  );
+}
+
+async function getTargetGuild() {
+  const targetGuildId = getTargetGuildId();
+  if (!targetGuildId) {
+    throw new Error("TARGET_GUILD_ID is missing.");
+  }
+
+  return client.guilds.fetch(targetGuildId);
+}
+
+async function deleteAllChannelsInTargetGuild() {
+  const guild = await getTargetGuild();
+  await guild.channels.fetch();
+
+  const channels = [...guild.channels.cache.values()]
+    .filter((channel) => channel.deletable)
+    .sort((left, right) => {
+      if (left.type === ChannelType.GuildCategory && right.type !== ChannelType.GuildCategory) {
+        return 1;
+      }
+
+      if (left.type !== ChannelType.GuildCategory && right.type === ChannelType.GuildCategory) {
+        return -1;
+      }
+
+      return 0;
+    });
+
+  let deletedChannels = 0;
+
+  for (const channel of channels) {
+    try {
+      temporaryRooms.delete(channel.id);
+      await channel.delete("Admin panel cleanup");
+      deletedChannels += 1;
+    } catch (error) {
+      console.error(`Failed to delete channel ${channel.id}:`, error);
+    }
+  }
+
+  return deletedChannels;
+}
+
+async function disconnectAllFromTargetGuild() {
+  const guild = await getTargetGuild();
+  await guild.channels.fetch();
+
+  let kickedUsers = 0;
+  const processedMembers = new Set();
+
+  for (const channel of guild.channels.cache.values()) {
+    if (channel.type !== ChannelType.GuildVoice) {
+      continue;
+    }
+
+    for (const member of channel.members.values()) {
+      if (member.user.bot || processedMembers.has(member.id)) {
+        continue;
+      }
+
+      try {
+        await member.voice.disconnect("Admin panel mass disconnect");
+        processedMembers.add(member.id);
+        kickedUsers += 1;
+      } catch (error) {
+        console.error(`Failed to disconnect member ${member.id}:`, error);
+      }
+    }
+  }
+
+  return kickedUsers;
+}
+
 async function createTemporaryRoom(member) {
   const guild = member.guild;
   const triggerChannel = guild.channels.cache.get(process.env.CREATE_CHANNEL_ID);
@@ -298,6 +477,7 @@ async function handleTriggerJoin(newState) {
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
+  await registerCommands();
   console.log(`Logged in as ${readyClient.user.tag}`);
 });
 
@@ -337,8 +517,68 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   try {
+    if (interaction.isChatInputCommand() && interaction.commandName === ADMIN_COMMAND_NAME) {
+      const adminGuildId = getAdminGuildId();
+      if (adminGuildId && interaction.guildId !== adminGuildId) {
+        await interaction.reply({
+          content: "Эта команда доступна только на сервере с админ-панелью.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (!hasAdminAccess(interaction.member)) {
+        await interaction.reply({
+          content: "Эта команда доступна только администраторам сервера.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.reply(buildAdminPanelPayload());
+      return;
+    }
+
     if (interaction.isButton()) {
       const member = interaction.member;
+
+      if (interaction.customId.startsWith("admin-panel:")) {
+        if (!hasAdminAccess(member)) {
+          await interaction.reply({
+            content: "Эта кнопка доступна только администраторам сервера.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (interaction.customId === "admin-panel:ban") {
+          await interaction.showModal(buildBanModal());
+          return;
+        }
+
+        if (interaction.customId === "admin-panel:delete-rooms") {
+          const deletedRooms = await deleteAllChannelsInTargetGuild();
+          await interaction.reply({
+            content: deletedRooms === 0
+              ? "На целевом сервере нет удаляемых каналов."
+              : `Удалено каналов на целевом сервере: ${deletedRooms}.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (interaction.customId === "admin-panel:kick-all") {
+          const kickedUsers = await disconnectAllFromTargetGuild();
+          await interaction.reply({
+            content: kickedUsers === 0
+              ? "На целевом сервере сейчас нет пользователей в голосовых каналах."
+              : `Отключено пользователей на целевом сервере: ${kickedUsers}.`,
+            ephemeral: true,
+          });
+          return;
+        }
+      }
+
       const roomInfo = getMemberRoom(member);
 
       if (!roomInfo) {
@@ -455,6 +695,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === "room-panel:kick") {
         await interaction.showModal(buildKickModal(channel));
       }
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === "admin-panel:ban") {
+      if (!hasAdminAccess(interaction.member)) {
+        await interaction.reply({
+          content: "Это действие доступно только администраторам сервера.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const targetUserId = normalizeUserId(interaction.fields.getTextInputValue("targetUser"));
+      const banReason = interaction.fields.getTextInputValue("banReason").trim() || "Бан через админ-панель";
+
+      if (!targetUserId) {
+        await interaction.reply({
+          content: "Нужно указать ID пользователя или @упоминание.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const targetGuild = await getTargetGuild();
+      await targetGuild.members.ban(targetUserId, { reason: banReason });
+      await interaction.reply({
+        content: `Пользователь ${targetUserId} забанен на целевом сервере.`,
+        ephemeral: true,
+      });
       return;
     }
 
