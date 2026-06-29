@@ -117,15 +117,15 @@ function buildAdminPanelPayload() {
         fields: [
           {
             name: "Забанить",
-            value: "Открывает окно для бана участника по ID или упоминанию.",
+            value: "Открывает окно для бана одного или нескольких участников по ID или упоминанию через ;.",
           },
           {
             name: "Удалить комнаты",
-            value: "Удаляет все временные комнаты, которые сейчас отслеживает бот.",
+            value: "Удаляет все удаляемые каналы на целевом сервере.",
           },
           {
             name: "Кикнуть всех",
-            value: "Отключает всех пользователей из временных комнат бота.",
+            value: "Кикает всех кикаемых пользователей с целевого сервера.",
           },
         ],
       },
@@ -138,10 +138,10 @@ function buildAdminPanelPayload() {
 function buildBanModal() {
   const targetInput = new TextInputBuilder()
     .setCustomId("targetUser")
-    .setLabel("ID пользователя или @упоминание")
+    .setLabel("ID/упоминания через ;")
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
-    .setPlaceholder("Вставь ID или @упоминание");
+    .setPlaceholder("ID1;ID2;@user3");
 
   const reasonInput = new TextInputBuilder()
     .setCustomId("banReason")
@@ -158,6 +158,15 @@ function buildBanModal() {
       new ActionRowBuilder().addComponents(targetInput),
       new ActionRowBuilder().addComponents(reasonInput),
     );
+}
+
+function parseUserIds(rawValue) {
+  return [...new Set(
+    rawValue
+      .split(";")
+      .map((value) => normalizeUserId(value))
+      .filter(Boolean),
+  )];
 }
 
 function getRoomRecord(channelId) {
@@ -362,30 +371,22 @@ async function deleteAllChannelsInTargetGuild() {
   return deletedChannels;
 }
 
-async function disconnectAllFromTargetGuild() {
+async function kickAllFromTargetGuild() {
   const guild = await getTargetGuild();
-  await guild.channels.fetch();
+  await guild.members.fetch();
 
   let kickedUsers = 0;
-  const processedMembers = new Set();
 
-  for (const channel of guild.channels.cache.values()) {
-    if (channel.type !== ChannelType.GuildVoice) {
+  for (const member of guild.members.cache.values()) {
+    if (member.user.bot || member.id === guild.ownerId || !member.kickable) {
       continue;
     }
 
-    for (const member of channel.members.values()) {
-      if (member.user.bot || processedMembers.has(member.id)) {
-        continue;
-      }
-
-      try {
-        await member.voice.disconnect("Admin panel mass disconnect");
-        processedMembers.add(member.id);
-        kickedUsers += 1;
-      } catch (error) {
-        console.error(`Failed to disconnect member ${member.id}:`, error);
-      }
+    try {
+      await member.kick("Admin panel mass kick");
+      kickedUsers += 1;
+    } catch (error) {
+      console.error(`Failed to kick member ${member.id}:`, error);
     }
   }
 
@@ -568,11 +569,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         if (interaction.customId === "admin-panel:kick-all") {
-          const kickedUsers = await disconnectAllFromTargetGuild();
+          const kickedUsers = await kickAllFromTargetGuild();
           await interaction.reply({
             content: kickedUsers === 0
-              ? "На целевом сервере сейчас нет пользователей в голосовых каналах."
-              : `Отключено пользователей на целевом сервере: ${kickedUsers}.`,
+              ? "На целевом сервере нет пользователей, которых бот может кикнуть."
+              : `Кикнуто пользователей с целевого сервера: ${kickedUsers}.`,
             ephemeral: true,
           });
           return;
@@ -707,21 +708,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const targetUserId = normalizeUserId(interaction.fields.getTextInputValue("targetUser"));
+      const targetUserIds = parseUserIds(interaction.fields.getTextInputValue("targetUser"));
       const banReason = interaction.fields.getTextInputValue("banReason").trim() || "Бан через админ-панель";
 
-      if (!targetUserId) {
+      if (targetUserIds.length === 0) {
         await interaction.reply({
-          content: "Нужно указать ID пользователя или @упоминание.",
+          content: "Нужно указать хотя бы один ID пользователя или @упоминание.",
           ephemeral: true,
         });
         return;
       }
 
       const targetGuild = await getTargetGuild();
-      await targetGuild.members.ban(targetUserId, { reason: banReason });
+      let bannedCount = 0;
+      const failedIds = [];
+
+      for (const targetUserId of targetUserIds) {
+        try {
+          await targetGuild.members.ban(targetUserId, { reason: banReason });
+          bannedCount += 1;
+        } catch (error) {
+          console.error(`Failed to ban member ${targetUserId}:`, error);
+          failedIds.push(targetUserId);
+        }
+      }
+
       await interaction.reply({
-        content: `Пользователь ${targetUserId} забанен на целевом сервере.`,
+        content: failedIds.length === 0
+          ? `Забанено пользователей на целевом сервере: ${bannedCount}.`
+          : `Забанено: ${bannedCount}. Не удалось забанить: ${failedIds.join(", ")}.`,
         ephemeral: true,
       });
       return;
